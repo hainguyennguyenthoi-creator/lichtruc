@@ -11,7 +11,7 @@ export const firebaseConfig = {
 };
 
 // 2) URL Web App của Google Apps Script (file mail.gs). Để trống '' = tắt gửi email.
-export const MAIL_URL = '';
+export const MAIL_URL = 'https://script.google.com/macros/s/AKfycbz4tXGjz6OmrJjhQPFu5EZMpJO3WvYVkYmJBETUasWOdehRz9f5Y5sEeTYaWrgMeGww/exec';
 
 // 3) Tên hiển thị
 export const APP_TITLE = 'Lịch trực Hoàn Mỹ PXL';
