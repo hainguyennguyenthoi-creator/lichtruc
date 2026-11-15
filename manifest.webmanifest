@@ -1,0 +1,12 @@
+{
+  "name": "Lịch trực Hoàn Mỹ PXL",
+  "short_name": "Lịch trực",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#0f3d5e",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}
