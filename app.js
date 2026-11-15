@@ -646,7 +646,7 @@ function render() {
   if (!S.authReady || (S.user && S.member === undefined)) { root.innerHTML = '<div class="center">Đang tải…</div>'; return; }
   if (!S.user) {
     root.innerHTML = `<div class="center login"><div class="logo">${ICON.lich}</div><h1>${esc(APP_TITLE)}</h1>
-      <p>Lịch luôn cập nhật · Đổi <p>Lịch trực luôn cập nhật · đổi &amp; bán trực · thống kê</p>amp; bán trực · Thống kê</p>
+      <p>Lịch luôn cập nhật · Đổi &amp; bán trực · Thống kê</p>
       <button class="btn big" data-act="login"><svg viewBox="0 0 24 24" class="g"><path d="M21.6 12.2c0-.7-.1-1.4-.2-2H12v3.9h5.4a4.6 4.6 0 0 1-2 3v2.5h3.2c1.9-1.7 3-4.3 3-7.4z"/><path d="M12 22c2.7 0 5-.9 6.6-2.4l-3.2-2.5c-.9.6-2 1-3.4 1-2.6 0-4.8-1.8-5.6-4.1H3.1v2.6A10 10 0 0 0 12 22z"/><path d="M6.4 13.9a6 6 0 0 1 0-3.8V7.5H3.1a10 10 0 0 0 0 9z"/><path d="M12 6c1.5 0 2.8.5 3.8 1.5l2.9-2.9A10 10 0 0 0 3.1 7.5l3.3 2.6C7.2 7.8 9.4 6 12 6z"/></svg>Đăng nhập bằng Google</button>
       <small>Chỉ Gmail đã được admin thêm mới vào được.</small></div>`;
     return;
