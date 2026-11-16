@@ -228,3 +228,12 @@ export function parseLT(text, doctors) {
   else if (end !== count) errors.push(`#END ghi ${end} nhưng có ${count} dòng ca.`);
   return { month, holidays: [...new Set(holidays)].sort(), rows, errors, warnings };
 }
+
+// Các tháng mà 1 giao dịch liên quan (lưu vào trường `ms` để chỉ tải giao dịch theo tháng → tiết kiệm lượt đọc)
+// Gồm tháng của các ca trong legs + tháng của giao dịch gốc (refId: trực thay → trả nợ / chuyển bán, đảo ngược)
+export function txMonths(t, byId = {}) {
+  const s = new Set((t.legs || []).map(l => monthOf(l.date)));
+  const ref = t.refId && byId[t.refId];
+  if (ref) (ref.legs || []).forEach(l => s.add(monthOf(l.date)));
+  return [...s].sort();
+}
