@@ -77,6 +77,7 @@ function legLines(t) {
   });
 }
 function describe(t) {
+  if (t.counterOf) return `<b>Đề nghị đổi ngày khác</b> – từ BS ${esc(dname(t.creatorDoctor))}<br>${legLines(t).map(esc).join('<br>')}`;
   return `<b>${TYPE[t.type] || t.type}</b> – tạo bởi BS ${esc(dname(t.creatorDoctor))}<br>${legLines(t).map(esc).join('<br>')}`;
 }
 const participants = t => [...new Set([t.creatorDoctor, ...(t.invitees || []), t.buyer, ...(t.legs || []).flatMap(l => [l.from, l.to])].filter(Boolean))];
@@ -205,7 +206,7 @@ async function createTx(data) {
 }
 
 // Người nhận đồng ý / từ chối
-async function respond(id, accept) {
+async function respond(id, accept, quiet = false) {
   const ref = doc(db, 'transactions', id);
   const me = myDoc();
   let res;
@@ -227,7 +228,7 @@ async function respond(id, accept) {
     res = { id, ...t, ...upd };
   });
   if (res.status === 'confirmed') mail(participants(res), 'Đổi/bán trực đã được xác nhận', ['Giao dịch đã có hiệu lực:', ...legLines(res)]);
-  else if (res.status === 'rejected') mail(participants(res), 'Yêu cầu đổi/bán trực bị từ chối', [`BS ${dname(me)} đã từ chối:`, ...legLines(res)]);
+  else if (res.status === 'rejected' && !quiet) mail(participants(res), 'Yêu cầu đổi/bán trực bị từ chối', [`BS ${dname(me)} đã từ chối:`, ...legLines(res)]);
   return res.status;
 }
 
@@ -405,7 +406,16 @@ const ACT = {
   edOpen: () => {
     const m = S.ed?.month || S.month;
     const mon = S.months[m];
-    S.ed = { month: m, rows: { ...(mon?.shifts || {}) }, holidays: [...(mon?.holidays || [])], lt: '', start: S.ed?.start || '', source: mon?.source || 'rotation', open: true, errs: [] };
+    // Tháng mới: tự chọn sẵn BS trực ngày 1 nối tiếp tua gốc tháng trước
+    const auto = !mon ? nextFromPrev(m)?.id || '' : '';
+    S.ed = { month: m, rows: { ...(mon?.shifts || {}) }, holidays: [...(mon?.holidays || [])], lt: '', start: S.ed?.start || auto, source: mon?.source || 'rotation', open: true, errs: [] };
+  },
+  edCont: () => {
+    const nx = nextFromPrev(S.ed.month);
+    if (!nx) throw new Error('Chưa có lịch gốc tháng trước (hoặc BS trong đó đều đã ngừng).');
+    S.ed.start = nx.id;
+    ACT.edRot();
+    toast(`Nối tiếp tua gốc: ngày 1 = BS ${dname(nx.id)} (sau BS ${dname(nx.prev)} ngày ${nx.day}).`);
   },
   edRot: () => {
     const order = doctorList().map(d => d.id);
@@ -583,6 +593,21 @@ ACT.memDel = async d => {
 };
 ACT.tkMode = d => { S.tkMode = d.v; };
 
+// Tìm BS trực ngày 1 của tháng m để nối tiếp vòng xoay theo LỊCH GỐC tháng trước:
+// lấy người trực gốc ngày cuối tháng trước (bỏ qua BS đã ngừng), rồi lấy người kế tiếp theo thứ tự ▲▼
+function nextFromPrev(m) {
+  const pm = S.months[L.addMonth(m, -1)];
+  if (!pm) return null;
+  const order = doctorList().map(d => d.id);
+  if (!order.length) return null;
+  const days = Object.keys(pm.shifts || {}).sort().reverse();
+  for (const dd of days) {
+    const id = pm.shifts[dd], i = order.indexOf(id);
+    if (i >= 0) return { id: order[(i + 1) % order.length], prev: id, day: `${dd}/${L.addMonth(m, -1).slice(5)}` };
+  }
+  return null;
+}
+
 // Ca từ hôm nay trở đi mà BS đang giữ (tháng chưa khóa)
 function futureShifts(id) {
   const today = L.vnToday(), out = [];
@@ -693,6 +718,36 @@ function inboxItems() {
       || (t.openToAll && !(t.legs || []).some(l => holderOf(l.date) === me))));
 }
 
+// Khung "Đổi ngày khác": người nhận chọn 1 ca khác của mình để đề nghị lại
+function counterBox(t) {
+  const me = myDoc(), A = t.creatorDoctor;
+  const aLeg = t.legs.find(l => l.from === A);          // ca của người gửi (giữ nguyên)
+  const mineAsked = t.legs.find(l => l.from === me);    // ca của tôi mà họ muốn lấy
+  const opts = L.eligibleShifts(me, S.months, S.txs).filter(d => d !== mineAsked?.date && d !== aLeg?.date)
+    .map(d => [d, `${L.fmtDate(d)}${L.isCnLe(d, S.months) ? ' (24h)' : ''}`]);
+  return `<div class="form"><b>Đề nghị BS ${esc(dname(A))} lấy ca khác của bạn</b>
+    <p class="muted">Bạn vẫn nhận ca ${L.fmtDate(aLeg.date)} của BS ${esc(dname(A))}, nhưng đưa lại ngày khác thay cho ${L.fmtDate(mineAsked.date)}. Yêu cầu cũ sẽ được từ chối, BS ${esc(dname(A))} nhận đề nghị mới để Đồng ý / Từ chối.</p>
+    ${opts.length ? `<label>Ca khác của tôi (${esc(dname(me))})${select('data-f', 'ctrShift', opts, S.form.ctrShift)}</label>
+    <div class="row"><button class="btn" data-act="ctrSend" data-id="${t.id}">Gửi đề nghị</button><button class="btn ghost" data-act="ctrClose">Đóng</button></div>`
+    : '<p class="muted">Bạn không còn ca nào khác có thể đổi.</p><button class="btn ghost" data-act="ctrClose">Đóng</button>'}</div>`;
+}
+ACT.ctrOpen = d => { S.form.ctr = d.id; S.form.ctrShift = ''; };
+ACT.ctrClose = () => { S.form.ctr = null; };
+ACT.ctrSend = async d => {
+  const t = S.txs.find(x => x.id === d.id), me = myDoc();
+  if (!t || t.status !== 'pending') throw new Error('Yêu cầu không còn hiệu lực.');
+  const A = t.creatorDoctor, aLeg = t.legs.find(l => l.from === A), newDate = S.form.ctrShift;
+  if (!newDate) throw new Error('Chọn ca khác của bạn.');
+  if (holderOf(aLeg.date) !== A) throw new Error(`Ca ${L.fmtDate(aLeg.date)} không còn do BS ${dname(A)} giữ.`);
+  const legs = [{ date: newDate, from: me, to: A }, { date: aLeg.date, from: A, to: me }];
+  if (!confirm(`Từ chối yêu cầu cũ và đề nghị lại:\n${legLines({ legs }).join('\n')}`)) return;
+  await respond(t.id, false, true);                // từ chối yêu cầu cũ (nhả khóa ca), không gửi mail từ chối
+  t.status = 'rejected'; S._sch = {};               // cập nhật ngay trên máy, không chờ đồng bộ
+  await createTx({ type: 'SWAP2', legs, invitees: [A], openToAll: false, counterOf: t.id });
+  mail([A], `BS ${dname(me)} đề nghị đổi ngày khác`, [`BS ${dname(me)} chưa đổi được ngày bạn chọn, đề nghị lại:`, ...legLines({ legs }), 'Vào web để Đồng ý / Từ chối.']);
+  S.form = {}; toast('Đã gửi đề nghị đổi ngày khác.');
+};
+
 function viewLich() {
   let h = '';
   const inbox = inboxItems();
@@ -701,7 +756,8 @@ function viewLich() {
       <div class="req">${describe(t)}<small>Hết hạn: ${fmtTime(t.expiresAt)}</small>
         <div class="row">${t.openToAll
           ? `<button class="btn ok" data-act="accept" data-id="${t.id}">Nhận ca</button>`
-          : `<button class="btn ok" data-act="accept" data-id="${t.id}">Đồng ý</button><button class="btn no" data-act="reject" data-id="${t.id}">Từ chối</button>`}</div>
+          : `<button class="btn ok" data-act="accept" data-id="${t.id}">Đồng ý</button><button class="btn no" data-act="reject" data-id="${t.id}">Từ chối</button>${t.type === 'SWAP2' ? `<button class="btn ghost" data-act="ctrOpen" data-id="${t.id}">Đổi ngày khác</button>` : ''}`}</div>
+        ${S.form.ctr === t.id ? counterBox(t) : ''}
       </div>`).join('')}</section>`;
   }
   const mon = S.months[S.month];
@@ -726,19 +782,19 @@ function calendarHtml(m) {
     const dd = L.pad(d), date = `${m}-${dd}`;
     const id = goc ? sch.base[dd] : sch.holder[dd];
     const cls = [];
-    let tag = '';
+    const tags = []; // nhiều nhãn xếp dọc: chờ/bán (ưu tiên) → Lễ → adm
     if (L.isCnLe(date, S.months)) cls.push('cnle');
-    if ((S.months[m].holidays || []).includes(dd)) tag = '<em>Lễ</em>';
     if (!goc) {
       const p = pend[date];
-      if (p) { cls.push(p.type.startsWith('SELL') ? 'sale' : 'pending'); tag = `<em>${p.type.startsWith('SELL') ? 'bán' : 'chờ'}</em>`; }
       const hs = sch.hist[dd] || [];
       if (hs.length) cls.push('changed');
-      if (hs.at(-1)?.tx.type === 'ADMIN_ADJUST') tag = '<em>adm</em>';
+      if (p) { cls.push(p.type.startsWith('SELL') ? 'sale' : 'pending'); tags.push(`<em class="st">${p.type.startsWith('SELL') ? 'bán' : 'chờ'}</em>`); }
     }
+    if ((S.months[m].holidays || []).includes(dd)) tags.push('<em>Lễ</em>');
+    if (!goc && !pend[date] && (sch.hist[dd] || []).at(-1)?.tx.type === 'ADMIN_ADJUST') tags.push('<em>adm</em>');
     if (id && id === myDoc()) cls.push('mine');
     h += `<div class="cell ${cls.join(' ')}" data-act="cell" data-date="${date}" style="--dc:${esc(dcolor(id))}"><span class="dd">${d}</span>
-      <span class="nm">${esc(dname(id))}</span>${tag}</div>`;
+      <span class="nm">${esc(dname(id))}</span><span class="tags">${tags.join('')}</span></div>`;
   }
   return h + '</div>';
 }
@@ -921,7 +977,9 @@ function viewAdmin() {
     const docs = doctorList().map(d => [d.id, d.name]);
     h += `<p><b>Tháng ${m.slice(5)}/${m.slice(0, 4)}</b> ${mon ? `<small>(đã có – phiên bản ${mon.version || 1}${mon.status === 'locked' ? ', ĐÃ KHÓA' : ''})</small>` : '<small>(mới)</small>'}</p>
       <div class="sub"><b>Cách 1 – Vòng xoay</b><label>BS trực ngày 1${select('data-ed', 'start', docs, ed.start)}</label>
-        <button class="btn ghost" data-act="edRot">Sinh lịch theo vòng xoay</button></div>
+        <div class="row"><button class="btn ghost" data-act="edRot">Sinh lịch theo vòng xoay</button>
+        ${S.months[L.addMonth(m, -1)] ? '<button class="btn ghost" data-act="edCont">Nối tiếp tua gốc tháng trước</button>' : ''}</div>
+        ${S.months[L.addMonth(m, -1)] && nextFromPrev(m) ? `<p class="muted">Gợi ý nối tiếp: ngày 1 = BS ${esc(dname(nextFromPrev(m).id))} (sau BS ${esc(dname(nextFromPrev(m).prev))} trực gốc ngày ${nextFromPrev(m).day}).</p>` : ''}</div>
       <div class="sub"><b>Cách 2 – Dán mã LT</b><textarea data-ed="lt" rows="5" placeholder="#LT v1&#10;THANG 2026-12&#10;...">${esc(ed.lt)}</textarea>
         <button class="btn ghost" data-act="edLT">Đọc mã LT</button></div>
       ${ed.errs?.length ? `<div class="warn">${ed.errs.map(esc).join('<br>')}</div>` : ''}
@@ -986,21 +1044,34 @@ function downloadBlob(blob, name) {
   setTimeout(() => URL.revokeObjectURL(url), 5000);
 }
 function exportIcs() {
-  const m = S.month, sch = sched(m), me = myDoc();
-  if (!sch || !me) return;
-  const mine = Object.keys(sch.holder).filter(dd => sch.holder[dd] === me).sort();
-  if (!mine.length) { toast('Bạn không có ca nào trong tháng này.', false); return; }
-  const stamp = d => d.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
-  const ev = mine.map(dd => {
-    const date = `${m}-${dd}`, cnle = L.isCnLe(date, S.months);
-    const start = new Date(L.shiftStart(date, S.months)), end = new Date(start.getTime() + L.hoursOf(date, S.months) * 3600e3);
-    return ['BEGIN:VEVENT', `UID:lichtruc-${date}-${me}@hmpxl`, `DTSTAMP:${stamp(new Date())}`, `DTSTART:${stamp(start)}`, `DTEND:${stamp(end)}`,
-      `SUMMARY:Trực ${cnle ? '24h' : ''} Hoàn Mỹ PXL`, `DESCRIPTION:${cnle ? 'CN/Lễ 7h → 7h hôm sau' : 'Ngày thường 16h → 7h hôm sau'} · xuất từ web Lịch trực`,
-      'BEGIN:VALARM', 'TRIGGER:-PT18H', 'ACTION:DISPLAY', 'DESCRIPTION:Mai trực', 'END:VALARM', 'END:VEVENT'].join('\r\n');
+  // Xuất ca của tôi trong tháng đang xem + tháng sau (nếu đã có lịch); mỗi ca = 1 sự kiện CẢ NGÀY đúng ngày trực
+  const me = myDoc();
+  if (!me) return;
+  const today = L.vnToday(), list = [];
+  for (const m of [S.month, L.addMonth(S.month, 1)]) {
+    if (!S.months[m]) continue;
+    const sch = sched(m);
+    for (const dd of Object.keys(sch.holder).sort()) if (sch.holder[dd] === me) list.push(`${m}-${dd}`);
+  }
+  if (!list.length) { toast('Bạn không có ca nào trong tháng này và tháng sau.', false); return; }
+  const ymd = d => d.replace(/-/g, '');
+  const next = d => { const t = new Date(d + 'T00:00:00Z'); t.setUTCDate(t.getUTCDate() + 1); return t.toISOString().slice(0, 10); };
+  const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
+  const ev = list.map(date => {
+    const cnle = L.isCnLe(date, S.months);
+    return ['BEGIN:VEVENT', `UID:lichtruc-${date}-${me}@hmpxl`, `DTSTAMP:${stamp}`,
+      `DTSTART;VALUE=DATE:${ymd(date)}`, `DTEND;VALUE=DATE:${ymd(next(date))}`,
+      `SUMMARY:${cnle ? 'Trực 24h' : 'Trực đêm'} HM PXL`, 'TRANSP:TRANSPARENT',
+      'BEGIN:VALARM', 'TRIGGER:-PT4H', 'ACTION:DISPLAY', 'DESCRIPTION:Mai trực', 'END:VALARM', 'END:VEVENT'].join('\r\n');
   });
-  const ics = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//LichTruc//VI', 'CALSCALE:GREGORIAN', ...ev, 'END:VCALENDAR'].join('\r\n');
-  downloadBlob(new Blob([ics], { type: 'text/calendar;charset=utf-8' }), `truc-${m}.ics`);
-  toast(`Đã tạo file ${mine.length} ca – mở file để thêm vào lịch.`);
+  const ics = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//LichTruc//VI', 'CALSCALE:GREGORIAN', ...ev, 'END:VCALENDAR'].join('\r\n') + '\r\n';
+  const name = `ca-truc-${today}.ics`;
+  const file = new File([ics], name, { type: 'text/calendar' });
+  // Điện thoại: mở khung chia sẻ để chọn thẳng app Lịch; máy tính: tải file
+  if (navigator.canShare?.({ files: [file] })) {
+    navigator.share({ files: [file], title: 'Ca trực của tôi' }).catch(() => downloadBlob(file, name));
+  } else downloadBlob(file, name);
+  toast(`${list.length} ca (tháng này + tháng sau) – chọn app Lịch để thêm.`);
 }
 function exportBackup() {
   const data = { exportedAt: new Date().toISOString(), by: myEmail(), doctors: S.doctors, members: S.members, months: S.months, transactions: S.txs };
