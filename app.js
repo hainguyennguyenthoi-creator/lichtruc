@@ -2,14 +2,14 @@
 // Nguyên tắc: lịch gốc bất biến; mọi thay đổi là 1 giao dịch (transactions) có truy vết.
 // Đổi số v khi sửa config.js / logic.js để điện thoại tải bản mới
 import { firebaseConfig, MAIL_URL, APP_TITLE } from './config.js?v=2';
-import * as L from './logic.js?v=2';
+import * as L from './logic.js?v=3';
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js';
 import {
   getAuth, GoogleAuthProvider, signInWithPopup, signInWithRedirect, signOut, onAuthStateChanged,
 } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js';
 import {
   getFirestore, collection, doc, onSnapshot, updateDoc, deleteDoc, runTransaction,
-  serverTimestamp, Timestamp, writeBatch, getDoc, query, orderBy, limit,
+  serverTimestamp, Timestamp, writeBatch, getDoc, getDocs, query, where, orderBy, limit,
 } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js';
 
 const fb = initializeApp(firebaseConfig);
@@ -20,6 +20,9 @@ const db = getFirestore(fb);
 const S = {
   authReady: false, user: null, member: undefined, subscribed: false, unsub: [],
   doctors: {}, members: {}, months: {}, txs: [], locks: {},
+  // Giao dịch tải theo 3 nguồn (gộp vào S.txs): live = tháng chưa khóa (real-time), debt = trực thay/nợ tua (real-time),
+  // lazy = tháng đã khóa, chỉ tải khi mở xem. liveSet = các tháng đang theo dõi real-time.
+  txLive: {}, txDebt: {}, txLazy: {}, lazyMonths: {}, liveKey: null, liveSet: new Set(), unsubTx: null, logsSub: false,
   tab: 'lich', view: 'current', month: L.vnToday().slice(0, 7),
   form: {}, ed: null, editDoc: null, adj: {}, busy: false, _sch: {},
   setupDone: undefined, logs: [], tkMode: 'thang', logFilter: '', newMem: { email: '', role: 'viewer' },
@@ -103,7 +106,9 @@ async function mailTo(list, subject, lines) {
 // ===================== ĐĂNG NHẬP & ĐỒNG BỘ DỮ LIỆU =====================
 onAuthStateChanged(auth, u => {
   S.unsub.forEach(f => f());
+  S.unsubTx?.();
   S.unsub = []; S.subscribed = false;
+  Object.assign(S, { txLive: {}, txDebt: {}, txLazy: {}, lazyMonths: {}, liveKey: null, liveSet: new Set(), unsubTx: null, logsSub: false, txs: [], txLoaded: false, logs: [] });
   S.authReady = true; S.user = u; S.member = undefined;
   render();
   if (!u) return;
@@ -124,14 +129,65 @@ function subscribeAll() {
   const on = (name, fn) => S.unsub.push(onSnapshot(collection(db, name), snap => { fn(snap); afterData(); }, e => console.error(name, e)));
   on('doctors', s => { S.doctors = {}; s.forEach(d => (S.doctors[d.id] = { id: d.id, ...d.data() })); });
   on('members', s => { S.members = {}; s.forEach(d => (S.members[d.id] = d.data())); });
-  on('months', s => { S.months = {}; s.forEach(d => (S.months[d.id] = { id: d.id, ...d.data() })); });
-  on('transactions', s => { S.txs = []; s.forEach(d => S.txs.push({ id: d.id, ...d.data({ serverTimestamps: 'estimate' }) })); S.txLoaded = true; });
+  on('months', s => { S.months = {}; s.forEach(d => (S.months[d.id] = { id: d.id, ...d.data() })); subscribeLive(); });
   on('locks', s => { S.locks = {}; s.forEach(d => (S.locks[d.id] = d.data())); });
-  if (isAdmin()) {
-    S.unsub.push(onSnapshot(query(collection(db, 'logs'), orderBy('at', 'desc'), limit(300)), s => {
-      S.logs = []; s.forEach(d => S.logs.push({ id: d.id, ...d.data({ serverTimestamps: 'estimate' }) })); render();
-    }, e => console.error('logs', e)));
+  // Trực thay / nợ tua: luôn tải đủ (ít), vì khoản nợ có thể kéo dài qua tháng đã khóa
+  S.unsub.push(onSnapshot(query(collection(db, 'transactions'), where('type', 'in', ['COVER', 'REPAY', 'DEBT_TO_SELL'])), s => {
+    S.txDebt = txMap(s); mergeTxs(); afterData();
+  }, e => console.error('txDebt', e)));
+}
+
+const txMap = snap => { const o = {}; snap.forEach(d => (o[d.id] = { id: d.id, ...d.data({ serverTimestamps: 'estimate' }) })); return o; };
+// Gộp 3 nguồn giao dịch; bản real-time ưu tiên hơn bản tải 1 lần
+function mergeTxs() { S.txs = Object.values({ ...S.txLazy, ...S.txDebt, ...S.txLive }); S._sch = {}; }
+const txById = () => Object.fromEntries(S.txs.map(t => [t.id, t]));
+
+// Theo dõi real-time giao dịch của các tháng CHƯA KHÓA (tối đa 30 tháng gần nhất – giới hạn của Firestore)
+function subscribeLive() {
+  const live = Object.keys(S.months).filter(m => S.months[m].status !== 'locked').sort().slice(-30);
+  const key = live.join(',');
+  if (key === S.liveKey) return;
+  S.liveKey = key; S.liveSet = new Set(live);
+  S.unsubTx?.(); S.unsubTx = null;
+  S.txLive = {}; S.txLoaded = false;
+  // Tháng vừa chuyển trạng thái → tải lại khi cần
+  for (const m of Object.keys(S.lazyMonths)) if (S.liveSet.has(m)) delete S.lazyMonths[m];
+  if (!live.length) { S.txLoaded = true; mergeTxs(); return; }
+  S.unsubTx = onSnapshot(query(collection(db, 'transactions'), where('ms', 'array-contains-any', live)), s => {
+    S.txLive = txMap(s); S.txLoaded = true; mergeTxs(); afterData();
+  }, e => console.error('txLive', e));
+}
+
+// Tháng đã khóa (hoặc ngoài 30 tháng theo dõi): tải giao dịch 1 lần khi mở xem. Trả true nếu dữ liệu đã sẵn sàng.
+function ensureMonths(list) {
+  let ready = S.txLoaded;
+  for (const m of list) {
+    if (!S.months[m] || S.liveSet.has(m)) continue;
+    if (S.lazyMonths[m] === 'done') continue;
+    ready = false;
+    if (S.lazyMonths[m] === 'loading') continue;
+    S.lazyMonths[m] = 'loading';
+    getDocs(query(collection(db, 'transactions'), where('ms', 'array-contains', m)))
+      .then(s => { Object.assign(S.txLazy, txMap(s)); S.lazyMonths[m] = 'done'; mergeTxs(); render(); })
+      .catch(e => { console.error('lazy', m, e); delete S.lazyMonths[m]; toast('Lỗi tải dữ liệu tháng ' + m, false); });
   }
+  return ready;
+}
+const loadingCard = '<p class="muted">Đang tải dữ liệu tháng…</p>';
+
+// Nhật ký admin: chỉ tải khi mở tab Admin (100 dòng gần nhất)
+function subscribeLogs() {
+  if (S.logsSub || !isAdmin()) return;
+  S.logsSub = true;
+  S.unsub.push(onSnapshot(query(collection(db, 'logs'), orderBy('at', 'desc'), limit(100)), s => {
+    S.logs = []; s.forEach(d => S.logs.push({ id: d.id, ...d.data({ serverTimestamps: 'estimate' }) })); render();
+  }, e => console.error('logs', e)));
+}
+
+// Tải TOÀN BỘ giao dịch 1 lần (chỉ dùng cho sao lưu, nâng cấp dữ liệu, kiểm tra xóa BS – thao tác hiếm của admin)
+async function allTxs() {
+  const s = await getDocs(collection(db, 'transactions'));
+  return Object.values(txMap(s));
 }
 
 // Ghi nhật ký admin vào cùng batch
@@ -141,6 +197,13 @@ function logAct(b, kind, text) {
 }
 
 function afterData() {
+  // Admin: tự bổ sung trường ms cho giao dịch cũ 1 lần trên mỗi máy (sau bản cập nhật tối ưu lượt đọc)
+  if (isAdmin() && S.txLoaded && !S.msChecked) {
+    S.msChecked = true;
+    let done = false;
+    try { done = localStorage.getItem('lichtruc-ms-v3') === '1'; } catch (e) {}
+    if (!done) ACT.migrateMs(true).then(() => { try { localStorage.setItem('lichtruc-ms-v3', '1'); } catch (e) {} }).catch(e => console.warn('migrate', e));
+  }
   if (!S.monthPicked && Object.keys(S.months).length) {
     S.monthPicked = true;
     if (!S.months[S.month]) {
@@ -198,7 +261,7 @@ async function createTx(data) {
     const ls = await Promise.all(dates.map(d => tr.get(doc(db, 'locks', d))));
     if (ls.some(s => s.exists())) throw new Error('Có ca vừa được người khác tạo yêu cầu, vui lòng thử lại.');
     tr.set(ref, {
-      ...data, status: 'pending', accepted: [], createdBy: myEmail(), creatorDoctor: myDoc(),
+      ...data, ms: L.txMonths(data, txById()), status: 'pending', accepted: [], createdBy: myEmail(), creatorDoctor: myDoc(),
       createdAt: serverTimestamp(), expiresAt: Timestamp.fromMillis(exp),
     });
     dates.forEach(d => tr.set(doc(db, 'locks', d), { tx: ref.id, by: myEmail(), at: serverTimestamp() }));
@@ -256,7 +319,7 @@ async function adminTx(data) {
   const ref = doc(collection(db, 'transactions'));
   const b = writeBatch(db);
   b.set(ref, {
-    invitees: [], accepted: [], openToAll: false, ...data, status: 'confirmed',
+    invitees: [], accepted: [], openToAll: false, ...data, ms: L.txMonths(data, txById()), status: 'confirmed',
     createdBy: myEmail(), creatorDoctor: myDoc(), createdAt: serverTimestamp(), confirmedAt: serverTimestamp(),
   });
   if (data.refId) b.update(doc(db, 'transactions', data.refId), { reversed: true, reversedBy: ref.id });
@@ -536,7 +599,7 @@ const ACT = {
     const x = S.doctors[d.id];
     if (x.email === myEmail()) throw new Error('Không thể xóa chính bạn.');
     const used = Object.values(S.months).some(m => Object.values(m.shifts || {}).includes(x.id)) ||
-      S.txs.some(t => participants(t).includes(x.id));
+      (await allTxs()).some(t => participants(t).includes(x.id));
     if (used) throw new Error('BS đã có ca trong lịch sử → không xóa hẳn được. Dùng "Ngừng".');
     if (!confirm(`Xóa hẳn BS ${x.name}?`)) return;
     const b = writeBatch(db);
@@ -692,6 +755,7 @@ function render() {
   const inbox = inboxItems().length;
   const tabs = [['lich', 'Lịch', inbox], ['doi', 'Đổi/Bán', 0], ['tk', 'Thống kê', 0]];
   if (isAdmin()) tabs.push(['admin', 'Admin', 0]);
+  if (S.tab === 'admin') subscribeLogs();
   const body = { lich: viewLich, doi: viewDoi, tk: viewTk, admin: viewAdmin }[S.tab] || viewLich;
   root.innerHTML = `
     <header><div><b>${esc(APP_TITLE)}</b><small>${esc(myDoc() ? 'BS ' + dname(myDoc()) : S.user.email)}${isAdmin() ? ' · admin' : S.member.role === 'viewer' ? ' · chỉ xem' : ''}</small></div>
@@ -765,6 +829,7 @@ function viewLich() {
   const mon = S.months[S.month];
   h += `<section class="card">${monthNav()}`;
   if (!mon) return h + '<p class="muted">Chưa có lịch tháng này.</p></section>';
+  if (!ensureMonths([S.month])) return h + loadingCard + '</section>';
   h += `<div class="seg"><button class="${S.view === 'current' ? 'on' : ''}" data-act="view" data-v="current">Lịch hiện hành</button>
     <button class="${S.view === 'goc' ? 'on' : ''}" data-act="view" data-v="goc">Lịch gốc</button></div>`;
   if (mon.status === 'locked') h += '<p class="badge">🔒 Tháng đã khóa</p>';
@@ -802,7 +867,9 @@ function calendarHtml(m) {
 }
 
 function openCell(date) {
-  const m = L.monthOf(date), dd = date.slice(8), sch = sched(m);
+  const m = L.monthOf(date), dd = date.slice(8);
+  if (!ensureMonths([m])) { toast('Đang tải dữ liệu tháng, thử lại sau giây lát.'); return; }
+  const sch = sched(m);
   if (!sch) return;
   const hist = sch.hist[dd] || [], p = pendMap()[date];
   let h = `<h3>${L.fmtDate(date)}/${m.slice(0, 4)}</h3>
@@ -898,6 +965,7 @@ const statHead = '<thead><tr><th>BS</th><th>Tổng ca</th><th>Thường</th><th>
 function viewTkThang(seg) {
   const m = S.month;
   let h = `<section class="card">${seg}${monthNav()}`;
+  if (S.months[m] && !ensureMonths([m])) return h + loadingCard + '</section>';
   const st = L.monthStats(m, S.months, S.txs, doctorList().map(d => d.id));
   if (!st) return h + '<p class="muted">Chưa có lịch tháng này.</p></section>';
   const rows = doctorList(false).map(d => d.id).filter(id => st[id]);
@@ -915,6 +983,7 @@ function viewTkNam(seg) {
   const ms = Object.keys(S.months).filter(m => m.startsWith(y + '-')).sort();
   let h = `<section class="card">${seg}<div class="mnav"><button data-act="yprev">‹</button><b>Năm ${y}</b><button data-act="ynext">›</button></div>`;
   if (!ms.length) return h + '<p class="muted">Chưa có lịch tháng nào trong năm.</p></section>';
+  if (!ensureMonths(ms)) return h + loadingCard + '</section>';
   const tot = {}, per = {};
   for (const m of ms) {
     const st = L.monthStats(m, S.months, S.txs, []);
@@ -1029,8 +1098,11 @@ function viewAdmin() {
     <p class="muted">Đổi/bán/điều chỉnh ca xem ở tab Thống kê → Giao dịch, hoặc bấm vào ô lịch.</p></section>`;
 
   // --- Sao lưu ---
-  h += `<section class="card"><h3>Sao lưu dữ liệu</h3><p class="muted">Tải toàn bộ bác sĩ, lịch gốc, giao dịch ra 1 file JSON. Nên làm mỗi tháng sau khi khóa tháng.</p>
-    <button class="btn ghost" data-act="backup">Tải file sao lưu</button></section>`;
+  h += `<section class="card"><h3>Sao lưu dữ liệu</h3><p class="muted">Lưu toàn bộ bác sĩ, lịch gốc, giao dịch ra 1 file JSON. Nên làm mỗi tháng sau khi khóa tháng.</p>
+    <div class="row"><button class="btn" data-act="backupDrive">Sao lưu lên Google Drive</button><button class="btn ghost" data-act="backup">Tải về máy</button></div>
+    ${S.lastBackup ? `<p class="muted">Đã lưu: <a href="${esc(S.lastBackup.url)}" target="_blank" rel="noopener">${esc(S.lastBackup.name)}</a> (thư mục ${esc(S.lastBackup.folder)})</p>` : ''}</section>
+    <section class="card"><h3>Bảo trì dữ liệu</h3><p class="muted">Bổ sung trường tháng (ms) cho giao dịch cũ để web chỉ tải dữ liệu cần thiết. Chạy 1 lần sau khi cập nhật code; chạy lại không sao.</p>
+    <button class="btn ghost" data-act="migrateMs">Cập nhật giao dịch cũ</button></section>`;
 
   // --- Yêu cầu đang chờ (toàn nhóm) ---
   const pend = S.txs.filter(t => t.status === 'pending');
@@ -1078,11 +1150,50 @@ function exportIcs(only) {
   } else downloadBlob(file, name);
   toast(only ? `Ca ${L.fmtDate(only)} – chọn app Lịch để thêm.` : `${list.length} ca (tháng này + tháng sau) – chọn app Lịch để thêm.`);
 }
-function exportBackup() {
-  const data = { exportedAt: new Date().toISOString(), by: myEmail(), doctors: S.doctors, members: S.members, months: S.months, transactions: S.txs };
-  downloadBlob(new Blob([JSON.stringify(data, null, 1)], { type: 'application/json' }), `lichtruc-backup-${L.vnToday()}.json`);
-  toast('Đã tải file sao lưu.');
+async function backupData() {
+  const transactions = await allTxs();
+  return { exportedAt: new Date().toISOString(), by: myEmail(), doctors: S.doctors, members: S.members, months: S.months, transactions };
 }
+const backupName = () => `lichtruc-backup-${L.vnToday()}_${new Date(Date.now() + 7 * 3600e3).toISOString().slice(11, 16).replace(':', '')}.json`;
+async function exportBackup() {
+  const data = await backupData();
+  downloadBlob(new Blob([JSON.stringify(data, null, 1)], { type: 'application/json' }), backupName());
+  toast('Đã tải file sao lưu về máy.');
+}
+// Gửi bản sao lưu lên Google Drive qua Apps Script (file mail.gs, chạy bằng tài khoản Google của admin)
+ACT.backupDrive = async () => {
+  if (!MAIL_URL) throw new Error('Chưa cấu hình MAIL_URL (Apps Script).');
+  const data = await backupData();
+  const idToken = await auth.currentUser.getIdToken();
+  let j;
+  try {
+    const r = await fetch(MAIL_URL, {
+      method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ action: 'backup', idToken, name: backupName(), data: JSON.stringify(data, null, 1) }),
+    });
+    j = await r.json();
+  } catch (e) { console.error(e); throw new Error('Không gửi được lên Drive (lỗi mạng hoặc Apps Script chưa cập nhật). Dùng \"Tải về máy\".'); }
+  if (!j.ok) throw new Error(j.err === 'admin' ? 'Chỉ admin được sao lưu.' : 'Apps Script báo lỗi: ' + j.err);
+  S.lastBackup = j;
+  const b = writeBatch(db);
+  logAct(b, 'month', `Sao lưu lên Drive: ${j.name}`);
+  await b.commit();
+  toast('Đã lưu lên Google Drive.');
+};
+// Bổ sung trường ms cho giao dịch tạo trước bản cập nhật
+ACT.migrateMs = async quiet => {
+  if (!isAdmin()) return;
+  if (quiet && typeof quiet === 'object') quiet = false; // gọi từ nút bấm
+  const all = await allTxs(), byId = Object.fromEntries(all.map(t => [t.id, t]));
+  const need = all.filter(t => JSON.stringify(t.ms || null) !== JSON.stringify(L.txMonths(t, byId)));
+  if (!need.length) { if (!quiet) toast('Dữ liệu đã cập nhật đủ, không cần làm gì.'); return; }
+  for (let i = 0; i < need.length; i += 400) {
+    const b = writeBatch(db);
+    need.slice(i, i + 400).forEach(t => b.update(doc(db, 'transactions', t.id), { ms: L.txMonths(t, byId) }));
+    await b.commit();
+  }
+  toast(`Đã cập nhật ${need.length} giao dịch.`);
+};
 
 // ===================== XUẤT ẢNH PNG (vẽ bằng canvas, không cần thư viện) =====================
 async function exportPng() {
