@@ -10,12 +10,16 @@
   <link rel="apple-touch-icon" href="icon-192.png">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-title" content="Lịch trực">
-  <link rel="stylesheet" href="style.css">
 </head>
 <body>
   <div id="app"><div class="center">Đang tải…</div></div>
   <div id="modal" class="hidden"></div>
   <div id="toast"></div>
-  <script type="module" src="app.js"></script>
+  <script>
+    // Luôn tải bản mới nhất của giao diện (tránh bộ nhớ đệm 10 phút của GitHub Pages)
+    const v = Date.now();
+    document.head.insertAdjacentHTML('beforeend', `<link rel="stylesheet" href="style.css?v=${v}">`);
+    import(`./app.js?v=${v}`);
+  </script>
 </body>
 </html>
