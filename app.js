@@ -1,7 +1,8 @@
 // app.js – Giao diện + thao tác Firebase cho web Lịch trực.
 // Nguyên tắc: lịch gốc bất biến; mọi thay đổi là 1 giao dịch (transactions) có truy vết.
-import { firebaseConfig, MAIL_URL, APP_TITLE } from './config.js';
-import * as L from './logic.js';
+// Đổi số v khi sửa config.js / logic.js để điện thoại tải bản mới
+import { firebaseConfig, MAIL_URL, APP_TITLE } from './config.js?v=2';
+import * as L from './logic.js?v=2';
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js';
 import {
   getAuth, GoogleAuthProvider, signInWithPopup, signInWithRedirect, signOut, onAuthStateChanged,
