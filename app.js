@@ -281,6 +281,7 @@ const ACT = {
   cell: d => openCell(d.date),
   png: () => exportPng(),
   ics: () => exportIcs(),
+  icsOne: d => { if (holderOf(d.date) !== myDoc()) throw new Error('Ca này không phải của bạn.'); exportIcs(d.date); },
   backup: () => exportBackup(),
 
   accept: async d => {
@@ -814,6 +815,7 @@ function openCell(date) {
   const dd0 = L.debts(S.txs, S.months).find(x => x.date === date);
   if (dd0) h += `<p class="muted">Ca này là trực thay: BS ${esc(dname(dd0.debtor))} ${dd0.status === 'open' ? 'đang nợ' : dd0.status === 'repaid' ? 'đã trả nợ' : 'đã chuyển thành bán cho'} BS ${esc(dname(dd0.creditor))}.</p>`;
   if (p) h += `<div class="warn">Đang chờ: ${describe(p)}</div>`;
+  if (myDoc() && sch.holder[dd] === myDoc()) h += `<button class="btn ghost" data-act="icsOne" data-date="${date}">Thêm ca này vào lịch điện thoại</button>`;
   if (isAdmin() && S.months[m].status !== 'locked') h += `<button class="btn" data-act="goadjust" data-date="${date}">Admin điều chỉnh ca này</button>`;
   modal(h);
 }
@@ -1043,12 +1045,14 @@ function downloadBlob(blob, name) {
   const a = document.createElement('a'); a.href = url; a.download = name; a.click();
   setTimeout(() => URL.revokeObjectURL(url), 5000);
 }
-function exportIcs() {
+function exportIcs(only) {
   // Xuất ca của tôi trong tháng đang xem + tháng sau (nếu đã có lịch); mỗi ca = 1 sự kiện CẢ NGÀY đúng ngày trực
+  // only = 'YYYY-MM-DD' → chỉ xuất đúng 1 ca đó (nút trong chi tiết ô lịch)
   const me = myDoc();
   if (!me) return;
   const today = L.vnToday(), list = [];
-  for (const m of [S.month, L.addMonth(S.month, 1)]) {
+  if (only) list.push(only);
+  else for (const m of [S.month, L.addMonth(S.month, 1)]) {
     if (!S.months[m]) continue;
     const sch = sched(m);
     for (const dd of Object.keys(sch.holder).sort()) if (sch.holder[dd] === me) list.push(`${m}-${dd}`);
@@ -1071,7 +1075,7 @@ function exportIcs() {
   if (navigator.canShare?.({ files: [file] })) {
     navigator.share({ files: [file], title: 'Ca trực của tôi' }).catch(() => downloadBlob(file, name));
   } else downloadBlob(file, name);
-  toast(`${list.length} ca (tháng này + tháng sau) – chọn app Lịch để thêm.`);
+  toast(only ? `Ca ${L.fmtDate(only)} – chọn app Lịch để thêm.` : `${list.length} ca (tháng này + tháng sau) – chọn app Lịch để thêm.`);
 }
 function exportBackup() {
   const data = { exportedAt: new Date().toISOString(), by: myEmail(), doctors: S.doctors, members: S.members, months: S.months, transactions: S.txs };
