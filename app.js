@@ -1065,7 +1065,7 @@ function exportIcs(only) {
     const cnle = L.isCnLe(date, S.months);
     return ['BEGIN:VEVENT', `UID:lichtruc-${date}-${me}@hmpxl`, `DTSTAMP:${stamp}`,
       `DTSTART;VALUE=DATE:${ymd(date)}`, `DTEND;VALUE=DATE:${ymd(next(date))}`,
-      `SUMMARY:${cnle ? 'Trực 24h' : 'Trực đêm'} HM PXL`, 'TRANSP:TRANSPARENT',
+      `SUMMARY:${cnle ? 'Trực 24h' : 'Trực đêm'} HM`, 'TRANSP:TRANSPARENT',
       'BEGIN:VALARM', 'TRIGGER:-PT4H', 'ACTION:DISPLAY', 'DESCRIPTION:Mai trực', 'END:VALARM', 'END:VEVENT'].join('\r\n');
   });
   const ics = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//LichTruc//VI', 'CALSCALE:GREGORIAN', ...ev, 'END:VCALENDAR'].join('\r\n') + '\r\n';
